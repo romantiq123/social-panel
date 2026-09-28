@@ -117,7 +117,15 @@ export default function SettingsPage() {
         <h2 className="mb-3 font-semibold">Чек-лист запуска</h2>
         <ol className="space-y-2 text-sm">
           <Step done={https}>
-            Публичный HTTPS-адрес панели (туннель). Нужен, чтобы Meta скачивала ваши медиа и для OAuth. Быстро: <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">cloudflared tunnel --url http://localhost:3001</code>
+            {data.deployed ? (
+              <>
+                Публичный HTTPS-адрес панели. На Railway это домен сервиса (Settings → Networking → Generate Domain) — он подставляется сам; если поле ниже пустое, впишите его вручную.
+              </>
+            ) : (
+              <>
+                Публичный HTTPS-адрес панели (туннель). Нужен, чтобы Meta скачивала ваши медиа и для OAuth. Быстро: <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">cloudflared tunnel --url http://localhost:3001</code>
+              </>
+            )}
           </Step>
           <Step done={!!(s.threads_app_id || s.instagram_app_id)}>
             Приложение в <a className="text-brand-600 underline" href="https://developers.facebook.com/apps" target="_blank" rel="noreferrer">Meta for Developers</a> с use case «Access the Threads API» и/или «Instagram API (Instagram login)», ключи ниже
