@@ -9,6 +9,7 @@ interface SettingsResp {
   redirect_uris: { threads: string; instagram: string };
   uninstall_uris: { threads: string; instagram: string };
   project_root: string;
+  deployed: boolean;
 }
 
 function CopyField({ label, value }: { label: string; value: string }) {
@@ -293,14 +294,18 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
-          <CopyField label="Локально, Claude Code (терминал)" value={mcpCmd} />
-          <div>
-            <Label>Claude Desktop → Settings → Developer → Edit config</Label>
-            <pre className="overflow-x-auto rounded-lg bg-zinc-100 p-3 text-xs dark:bg-zinc-800">{desktopJson}</pre>
-          </div>
-          <p className="text-zinc-500">
-            Также в корне проекта лежит <code>.mcp.json</code> — Claude Code подхватит сервер автоматически, если открыть сессию в папке проекта. Публикация по расписанию выполняется сервером панели — держите его запущенным.
-          </p>
+          {!data.deployed && (
+            <>
+              <CopyField label="Локально, Claude Code (терминал)" value={mcpCmd} />
+              <div>
+                <Label>Claude Desktop → Settings → Developer → Edit config</Label>
+                <pre className="overflow-x-auto rounded-lg bg-zinc-100 p-3 text-xs dark:bg-zinc-800">{desktopJson}</pre>
+              </div>
+              <p className="text-zinc-500">
+                Также в корне проекта лежит <code>.mcp.json</code> — Claude Code подхватит сервер автоматически, если открыть сессию в папке проекта. Публикация по расписанию выполняется сервером панели — держите его запущенным.
+              </p>
+            </>
+          )}
         </div>
       </Section>
     </div>

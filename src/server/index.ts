@@ -89,6 +89,8 @@ app.get('/api/settings', (c) =>
     redirect_uris: { threads: redirectUri('threads'), instagram: redirectUri('instagram') },
     uninstall_uris: { threads: `${getSettings().public_base_url}/oauth/threads/deauthorize`, instagram: `${getSettings().public_base_url}/oauth/instagram/deauthorize` },
     project_root: ROOT,
+    // На сервере (Railway/Docker) локальный stdio-MCP бесполезен — UI его не показывает
+    deployed: !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.NODE_ENV === 'production'),
   }),
 );
 
