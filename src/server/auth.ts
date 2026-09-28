@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Context, Next } from 'hono';
-import { getCookie } from 'hono/cookie';
+import { getCookie, setCookie } from 'hono/cookie';
 import { getInternal, setInternal } from '../core/settings.ts';
 
 export const COOKIE = 'sp_session';
@@ -27,6 +27,29 @@ function secret() {
 /** Токен сессии зависит от пароля — смена пароля разлогинивает всех */
 export function sessionToken() {
   return createHmac('sha256', secret()).update(ensurePassword()).digest('hex');
+}
+
+export const isLoggedIn = (c: Context) => getCookie(c, COOKIE) === sessionToken();
+
+export function startSession(c: Context) {
+  const secure = new URL(c.req.url).protocol === 'https:' || c.req.header('x-forwarded-proto') === 'https';
+  setCookie(c, COOKIE, sessionToken(), { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: 60 * 60 * 24 * 30, secure });
+}
+
+/** HMAC на секрете сессии — для CSRF-токенов и подписей */
+export const sign = (data: string) => createHmac('sha256', secret()).update(data).digest('base64url');
+
+/* Простой лимит на перебор пароля: 10 неудач за 15 минут с одного IP */
+const failures = new Map<string, number[]>();
+export const clientIp = (c: Context) => c.req.header('x-forwarded-for')?.split(',')[0].trim() || c.req.header('x-real-ip') || 'local';
+export function tooManyAttempts(ip: string) {
+  const since = Date.now() - 15 * 60_000;
+  const list = (failures.get(ip) ?? []).filter((t) => t > since);
+  failures.set(ip, list);
+  return list.length >= 10;
+}
+export function recordFailure(ip: string) {
+  failures.set(ip, [...(failures.get(ip) ?? []), Date.now()]);
 }
 
 /** Bearer-токен для удалённого MCP (/mcp) */
@@ -58,6 +81,6 @@ export async function authMiddleware(c: Context, next: Next) {
   const path = new URL(c.req.url).pathname;
   const needsAuth = path.startsWith('/api/') || path.startsWith('/oauth/');
   if (!needsAuth || PUBLIC.some((r) => r.test(path))) return next();
-  if (getCookie(c, COOKIE) === sessionToken()) return next();
+  if (isLoggedIn(c)) return next();
   return c.json({ error: 'unauthorized' }, 401);
 }

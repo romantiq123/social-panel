@@ -61,6 +61,8 @@ export default function SettingsPage() {
   const [sigs, setSigs] = useState<Signature[]>([]);
   const [sig, setSig] = useState({ name: '', content: '' });
   const [mcp, setMcp] = useState<{ token: string; from_env?: boolean } | null>(null);
+  const [clients, setClients] = useState<{ id: string; name: string | null; redirect_uris: string[]; created_at: string; last_used_at: string | null }[]>([]);
+  const loadClients = () => api.get<typeof clients>('/api/mcp-clients').then(setClients).catch(() => {});
 
   const load = () =>
     api.get<SettingsResp>('/api/settings').then((d) => {
@@ -72,6 +74,7 @@ export default function SettingsPage() {
     load();
     loadSigs();
     api.get<{ token: string; from_env: boolean }>('/api/mcp-token').then(setMcp).catch(() => {});
+    loadClients();
   }, []);
 
   const save = async () => {
@@ -227,9 +230,50 @@ export default function SettingsPage() {
 
       <Section icon={<Bot className="size-4" />} title="MCP для Claude" desc="Через MCP Claude может готовить посты, загружать медиа, ставить в расписание и смотреть статистику">
         <div className="space-y-4 text-sm">
+          <div className="space-y-3 rounded-lg border border-brand-500/30 bg-brand-50/50 p-4 dark:bg-brand-700/10">
+            <div className="font-medium">Claude.ai и Claude Desktop (OAuth)</div>
+            <ol className="list-decimal space-y-1 pl-5 text-zinc-600 dark:text-zinc-400">
+              <li>
+                claude.ai → Settings → <b>Connectors</b> → <b>Add custom connector</b>
+              </li>
+              <li>Name: Social Panel, URL — ниже</li>
+              <li>Connect → откроется окно панели → введите пароль → «Разрешить»</li>
+            </ol>
+            {https ? <CopyField label="Remote MCP server URL" value={`${s.public_base_url}/mcp`} /> : <div className="text-amber-600">Нужен публичный HTTPS-адрес (раздел выше)</div>}
+            <p className="text-xs text-zinc-500">Коннектор синхронизируется между вебом, десктопом и мобильным приложением Claude.</p>
+            {clients.length > 0 && (
+              <div>
+                <Label>Подключённые клиенты</Label>
+                <div className="divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
+                  {clients.map((cl) => (
+                    <div key={cl.id} className="flex items-center gap-3 px-3 py-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-medium">{cl.name ?? cl.id}</div>
+                        <div className="truncate text-xs text-zinc-500">
+                          {new URL(cl.redirect_uris[0]).host} · {cl.last_used_at ? `активен ${new Date(cl.last_used_at).toLocaleString('ru-RU')}` : 'ещё не использовался'}
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-red-600"
+                        onClick={async () => {
+                          if (!confirm(`Отозвать доступ «${cl.name}»?`)) return;
+                          await api.del(`/api/mcp-clients/${cl.id}`);
+                          loadClients();
+                        }}
+                      >
+                        Отозвать
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           {https && mcp && (
-            <div className="space-y-3 rounded-lg border border-brand-500/30 bg-brand-50/50 p-4 dark:bg-brand-700/10">
-              <div className="font-medium">Удалённый MCP (с любого компьютера)</div>
+            <div className="space-y-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+              <div className="font-medium">Claude Code по токену (без OAuth)</div>
               <CopyField label="Claude Code" value={`claude mcp add --transport http social-panel ${s.public_base_url}/mcp --header "Authorization: Bearer ${mcp.token}" --scope user`} />
               <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
                 Токен даёт полный доступ к публикациям — не публикуйте его.

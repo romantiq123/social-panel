@@ -73,15 +73,25 @@ Instagram должен быть **профессиональным** аккау�
 4. **Settings → Networking → Generate Domain.** Railway выдаст `https://….up.railway.app`, панель подхватит его сама (`RAILWAY_PUBLIC_DOMAIN`).
 5. Открой панель → Настройки: впиши ключи Meta и скопируй redirect URI в приложение Meta.
 
-### MCP с любого компьютера
+### Claude.ai / Desktop / мобильное приложение (OAuth)
 
-В Настройках панели лежит готовая команда с токеном:
+Панель сама является OAuth 2.1-сервером по спецификации MCP: метаданные `.well-known`, динамическая регистрация клиентов, PKCE, refresh-токены.
+
+1. claude.ai → Settings → **Connectors** → **Add custom connector**.
+2. URL: `https://<домен>/mcp`.
+3. **Connect**. Откроется страница панели: введи пароль и нажми «Разрешить».
+
+Коннектор появится в вебе, в Claude Desktop и в мобильном приложении. Список подключённых клиентов и кнопка отзыва доступа находятся в Настройках панели.
+
+### Claude Code по токену (без OAuth)
+
+В Настройках есть готовая команда:
 
 ```bash
 claude mcp add --transport http social-panel https://<домен>/mcp --header "Authorization: Bearer <токен>" --scope user
 ```
 
-Локальный stdio-MCP (`.mcp.json`) работает только с локальной базой `data/`. Когда панель живёт на Railway, используй удалённый.
+Локальный stdio-MCP (`.mcp.json`) работает только с локальной базой `data/`.
 
 ## MCP для Claude (локально)
 

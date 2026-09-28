@@ -76,6 +76,35 @@ CREATE TABLE IF NOT EXISTS signatures (
   created_at TEXT NOT NULL
 );
 
+-- OAuth 2.1 для удалённого MCP (Claude connectors). Токены храним только хэшами.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  id            TEXT PRIMARY KEY,
+  secret_hash   TEXT,
+  name          TEXT,
+  redirect_uris TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  last_used_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  hash         TEXT PRIMARY KEY,
+  client_id    TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+  redirect_uri TEXT NOT NULL,
+  challenge    TEXT NOT NULL,
+  scope        TEXT,
+  resource     TEXT,
+  expires_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  hash       TEXT PRIMARY KEY,
+  kind       TEXT NOT NULL CHECK (kind IN ('access','refresh')),
+  client_id  TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+  scope      TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS logs (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   level      TEXT NOT NULL,

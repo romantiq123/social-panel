@@ -1,7 +1,7 @@
 import '../core/paths.ts';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-import { setCookie, deleteCookie } from 'hono/cookie';
+import { deleteCookie } from 'hono/cookie';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, extname, basename } from 'node:path';
@@ -40,9 +40,10 @@ import {
 import { getProvider } from '../core/providers/index.ts';
 import { redirectUri } from '../core/providers/threads.ts';
 import { startScheduler } from '../core/scheduler.ts';
-import { authMiddleware, checkBearer, checkPassword, COOKIE, ensurePassword, mcpToken, sessionToken } from './auth.ts';
+import { authMiddleware, checkBearer, checkPassword, clientIp, COOKIE, ensurePassword, mcpToken, recordFailure, startSession, tooManyAttempts } from './auth.ts';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createMcpServer } from '../mcp/server.ts';
+import { listClients, mcpAuth, revokeClient, verifyAccessToken, wwwAuthenticate } from './mcpAuth.ts';
 import type { Provider } from '../core/types.ts';
 
 const app = new Hono();
@@ -54,15 +55,22 @@ app.onError((err, c) => {
 
 app.use('*', authMiddleware);
 
+// OAuth 2.1 для Claude connectors: .well-known, /mcp-auth/*
+app.route('/', mcpAuth);
+
 /* ---------------------------------- Auth ---------------------------------- */
 
 app.get('/api/health', (c) => c.json({ ok: true }));
 
 app.post('/api/login', async (c) => {
+  const ip = clientIp(c);
+  if (tooManyAttempts(ip)) return c.json({ error: 'Слишком много попыток, подождите 15 минут' }, 429);
   const { password } = await c.req.json();
-  if (!checkPassword(password)) return c.json({ error: 'Неверный пароль' }, 401);
-  const secure = new URL(c.req.url).protocol === 'https:' || c.req.header('x-forwarded-proto') === 'https';
-  setCookie(c, COOKIE, sessionToken(), { httpOnly: true, sameSite: 'Lax', path: '/', maxAge: 60 * 60 * 24 * 30, secure });
+  if (!checkPassword(password)) {
+    recordFailure(ip);
+    return c.json({ error: 'Неверный пароль' }, 401);
+  }
+  startSession(c);
   return c.json({ ok: true });
 });
 
@@ -265,9 +273,18 @@ app.post('/api/mcp-token/rotate', (c) => {
   return c.json({ token: mcpToken(true) });
 });
 
+app.get('/api/mcp-clients', (c) => c.json(listClients()));
+app.delete('/api/mcp-clients/:id', (c) => {
+  revokeClient(c.req.param('id'));
+  return c.json({ ok: true });
+});
+
 // Streamable HTTP, без сессий: на каждый запрос — свой сервер и транспорт
 app.all('/mcp', async (c) => {
-  if (!checkBearer(c.req.header('authorization'))) return c.json({ error: 'unauthorized' }, 401);
+  const auth = c.req.header('authorization');
+  if (!checkBearer(auth) && !verifyAccessToken(auth)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'WWW-Authenticate': wwwAuthenticate(c, !!auth) });
+  }
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   const server = createMcpServer();
   await server.connect(transport);
