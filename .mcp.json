@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "social-panel": {
+      "command": "node",
+      "args": ["--disable-warning=ExperimentalWarning", "node_modules/tsx/dist/cli.mjs", "src/mcp/index.ts"]
+    }
+  }
+}
