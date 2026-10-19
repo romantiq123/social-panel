@@ -3,11 +3,15 @@ import { z } from 'zod';
 
 import { db } from '../core/db.ts';
 import { getSettings } from '../core/settings.ts';
-import { listChannels, publicChannel, refreshChannelToken, refreshDueTokens } from '../core/channels.ts';
-import { importMedia, listMedia, publicMedia } from '../core/media.ts';
+import { listChannels, publicChannel, refreshChannelToken, refreshDueTokens, updateChannel } from '../core/channels.ts';
+import { deleteMedia, importMedia, listMedia, mediaUsage, publicMedia } from '../core/media.ts';
 import {
   createPosts,
   deletePost,
+  duplicatePost,
+  hideReply,
+  listReplies,
+  replyTo,
   getPost,
   listPosts,
   nextFreeSlot,
@@ -339,10 +343,92 @@ server.registerTool('get_post', { title: 'Пост', description: 'Полная 
 
 server.registerTool(
   'delete_post',
-  { title: 'Удалить пост', description: 'Удаляет пост из панели (из соцсети не удаляет).', inputSchema: { id: z.string() } },
-  run(({ id }: { id: string }) => {
-    deletePost(id);
-    return 'Удалено';
+  {
+    title: 'Удалить пост',
+    description:
+      'Удаляет пост из панели. from_network=true — НЕОБРАТИМО удаляет и саму публикацию в Threads (Instagram API удаление не поддерживает). Удаление из соцсети — только по явной просьбе пользователя.',
+    inputSchema: { id: z.string(), from_network: z.boolean().optional() },
+  },
+  run(async ({ id, from_network }: { id: string; from_network?: boolean }) => {
+    await deletePost(id, { remote: from_network });
+    return from_network ? 'Удалено из панели и из соцсети' : 'Удалено из панели (в соцсети пост остался)';
+  }),
+);
+
+server.registerTool(
+  'duplicate_post',
+  { title: 'Дублировать пост', description: 'Создаёт черновик-копию поста (текст, медиа, опции).', inputSchema: { id: z.string() } },
+  run(({ id }: { id: string }) => brief(duplicatePost(id))),
+);
+
+server.registerTool(
+  'delete_media',
+  {
+    title: 'Удалить медиа',
+    description:
+      'Удаляет файлы из библиотеки. Если файл нужен неопубликованным постам — вернёт ошибку со списком постов; force=true удалит файл и уберёт его из этих постов.',
+    inputSchema: { ids: z.array(z.string()).min(1), force: z.boolean().optional() },
+  },
+  run(async ({ ids, force }: { ids: string[]; force?: boolean }) => {
+    const out: { id: string; ok: boolean; error?: string }[] = [];
+    for (const id of ids) {
+      try {
+        await deleteMedia(id, { force });
+        out.push({ id, ok: true });
+      } catch (e: any) {
+        out.push({ id, ok: false, error: e.message });
+      }
+    }
+    return out;
+  }),
+);
+
+server.registerTool(
+  'media_usage',
+  { title: 'Где используется медиа', description: 'Неопубликованные посты, в которых используется файл.', inputSchema: { id: z.string() } },
+  run(({ id }: { id: string }) => mediaUsage(id)),
+);
+
+server.registerTool(
+  'set_time_slots',
+  {
+    title: 'Слоты очереди',
+    description: 'Задаёт время публикаций канала для очереди (next_slot), формат HH:mm в часовом поясе панели.',
+    inputSchema: { channel: z.string(), slots: z.array(z.string().regex(/^\d{2}:\d{2}$/)) },
+  },
+  run(({ channel, slots }: { channel: string; slots: string[] }) => JSON.parse(updateChannel(resolveChannel(channel).id, { time_slots: slots }).time_slots)),
+);
+
+server.registerTool(
+  'list_replies',
+  {
+    title: 'Ответы под постом',
+    description: 'Ответы (Threads) или комментарии (Instagram) под опубликованным постом. parent_id — у вложенных ответов.',
+    inputSchema: { post_id: z.string() },
+  },
+  run(async ({ post_id }: { post_id: string }) => listReplies(post_id)),
+);
+
+server.registerTool(
+  'reply',
+  {
+    title: 'Ответить',
+    description: 'Публикует ответ от имени канала: под постом или на конкретный ответ/комментарий (reply_id). Это публичное действие — отправлять только с согласия пользователя.',
+    inputSchema: { post_id: z.string(), text: z.string(), reply_id: z.string().optional() },
+  },
+  run(async ({ post_id, text, reply_id }: { post_id: string; text: string; reply_id?: string }) => ({ id: await replyTo(post_id, text, reply_id) })),
+);
+
+server.registerTool(
+  'hide_reply',
+  {
+    title: 'Скрыть ответ',
+    description: 'Скрывает (или возвращает, hide=false) ответ/комментарий под постом.',
+    inputSchema: { post_id: z.string(), reply_id: z.string(), hide: z.boolean().optional() },
+  },
+  run(async ({ post_id, reply_id, hide }: { post_id: string; reply_id: string; hide?: boolean }) => {
+    await hideReply(post_id, reply_id, hide ?? true);
+    return hide === false ? 'Ответ снова виден' : 'Ответ скрыт';
   }),
 );
 

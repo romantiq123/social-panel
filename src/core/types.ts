@@ -94,6 +94,17 @@ export interface TokenInfo {
   user_id?: string;
 }
 
+export interface ReplyItem {
+  id: string;
+  text: string;
+  username: string;
+  timestamp: string;
+  hidden?: boolean;
+  /** Для вложенных ответов — на что отвечают */
+  parent_id?: string;
+  like_count?: number;
+}
+
 export interface ProviderApi {
   id: Provider;
   label: string;
@@ -106,4 +117,11 @@ export interface ProviderApi {
   publish(input: PublishInput): Promise<PublishResult>;
   insights(channel: ChannelRow, externalId: string, options: PostOptions): Promise<Record<string, number>>;
   publishingLimit(channel: ChannelRow): Promise<{ used: number; total: number } | null>;
+  /** Удалить публикацию в самой соцсети */
+  deleteRemote(channel: ChannelRow, externalId: string): Promise<void>;
+  /** Ответы (Threads) / комментарии (Instagram) под публикацией */
+  listReplies(channel: ChannelRow, externalId: string): Promise<ReplyItem[]>;
+  /** Ответить: target — id публикации или ответа/комментария */
+  reply(channel: ChannelRow, target: { postId: string; replyId?: string }, text: string): Promise<string>;
+  hideReply(channel: ChannelRow, replyId: string, hide: boolean): Promise<void>;
 }

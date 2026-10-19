@@ -1,5 +1,5 @@
 import { getSettings } from '../settings.ts';
-import type { ChannelRow, ProviderApi, PublishInput } from '../types.ts';
+import type { ChannelRow, ProviderApi, PublishInput, ReplyItem } from '../types.ts';
 import { graph, GraphError, sleep } from './graph.ts';
 
 const BASE = 'https://graph.threads.net';
@@ -159,6 +159,37 @@ export const threads: ProviderApi = {
     const out: Record<string, number> = {};
     for (const m of r.data ?? []) out[m.name] = m.values?.[0]?.value ?? m.total_value?.value ?? 0;
     return out;
+  },
+
+  async deleteRemote(channel, externalId) {
+    await graph('DELETE', `${v()}/${externalId}`, { access_token: channel.access_token });
+  },
+
+  async listReplies(channel, externalId) {
+    // conversation — все ответы в ветке, включая вложенные
+    const r = await graph('GET', `${v()}/${externalId}/conversation`, {
+      fields: 'id,text,username,timestamp,hide_status,replied_to,root_post',
+      reverse: false,
+      access_token: channel.access_token,
+    });
+    return (r.data ?? []).map(
+      (x: any): ReplyItem => ({
+        id: x.id,
+        text: x.text ?? '',
+        username: x.username ?? '',
+        timestamp: x.timestamp,
+        hidden: x.hide_status === 'HIDDEN',
+        parent_id: x.replied_to?.id && x.replied_to.id !== externalId ? x.replied_to.id : undefined,
+      }),
+    );
+  },
+
+  async reply(channel, target, text) {
+    return publishPart(channel, text, [], { reply_to_id: target.replyId ?? target.postId });
+  },
+
+  async hideReply(channel, replyId, hide) {
+    await graph('POST', `${v()}/${replyId}/manage_reply`, { hide, access_token: channel.access_token });
   },
 
   async publishingLimit(channel) {

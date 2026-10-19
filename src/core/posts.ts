@@ -189,10 +189,48 @@ export function updatePost(id: string, patch: PostPatch): PostView {
   return getPost(id);
 }
 
-export function deletePost(id: string) {
+/**
+ * Удаляет пост из панели. С remote=true сначала удаляет публикацию в самой соцсети
+ * (Threads — да; Instagram API этого не умеет). Части цепочки Threads остаются ответами — их удаляйте отдельно.
+ */
+export async function deletePost(id: string, opts: { remote?: boolean } = {}) {
   const p = getPost(id);
   if (p.status === 'publishing') throw new Error('Пост сейчас публикуется');
+  if (opts.remote) {
+    if (p.status !== 'published' || !p.external_id) throw new Error('Пост ещё не опубликован — удалять в соцсети нечего');
+    const c = getChannel(p.channel_id);
+    await getProvider(c.provider).deleteRemote(c, p.external_id);
+    log('info', 'posts', `Публикация удалена из ${c.provider} @${c.username}: ${p.permalink ?? p.external_id}`, { channel_id: c.id });
+  }
   db.prepare('DELETE FROM posts WHERE id=?').run(id);
+}
+
+/* --------------------------------- Ответы --------------------------------- */
+
+function publishedRef(id: string) {
+  const p = getPost(id);
+  if (p.status !== 'published' || !p.external_id) throw new Error('Ответы есть только у опубликованных постов');
+  return { post: p, channel: getChannel(p.channel_id) };
+}
+
+export async function listReplies(postId: string) {
+  const { post, channel } = publishedRef(postId);
+  return getProvider(channel.provider).listReplies(channel, post.external_id!);
+}
+
+export async function replyTo(postId: string, text: string, replyId?: string) {
+  if (!text.trim()) throw new Error('Пустой ответ');
+  const { post, channel } = publishedRef(postId);
+  const limit = channel.provider === 'threads' ? 500 : 2200;
+  if (textLength(text, channel.provider) > limit) throw new Error(`Ответ длиннее ${limit} символов`);
+  const id = await getProvider(channel.provider).reply(channel, { postId: post.external_id!, replyId }, text);
+  log('info', 'replies', `Ответ от @${channel.username} опубликован`, { post_id: postId, channel_id: channel.id });
+  return id;
+}
+
+export async function hideReply(postId: string, replyId: string, hide = true) {
+  const { channel } = publishedRef(postId);
+  await getProvider(channel.provider).hideReply(channel, replyId, hide);
 }
 
 export function duplicatePost(id: string): PostView {

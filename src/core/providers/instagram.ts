@@ -1,5 +1,5 @@
 import { getSettings } from '../settings.ts';
-import type { ChannelRow, ProviderApi, PublishInput } from '../types.ts';
+import type { ChannelRow, ProviderApi, PublishInput, ReplyItem } from '../types.ts';
 import { graph, GraphError, sleep } from './graph.ts';
 import { redirectUri } from './threads.ts';
 
@@ -171,6 +171,36 @@ export const instagram: ProviderApi = {
       }
     }
     throw lastErr;
+  },
+
+  async deleteRemote() {
+    // Instagram Graph API не даёт удалять органические публикации
+    throw new GraphError('Instagram API не позволяет удалять публикации — удалите пост в приложении Instagram', 100);
+  },
+
+  async listReplies(channel, externalId) {
+    const r = await graph('GET', `${v()}/${externalId}/comments`, {
+      fields: 'id,text,username,timestamp,hidden,like_count,replies{id,text,username,timestamp,hidden,like_count}',
+      access_token: channel.access_token,
+    });
+    const out: ReplyItem[] = [];
+    for (const c of r.data ?? []) {
+      out.push({ id: c.id, text: c.text ?? '', username: c.username ?? '', timestamp: c.timestamp, hidden: c.hidden, like_count: c.like_count });
+      for (const x of c.replies?.data ?? [])
+        out.push({ id: x.id, text: x.text ?? '', username: x.username ?? '', timestamp: x.timestamp, hidden: x.hidden, like_count: x.like_count, parent_id: c.id });
+    }
+    return out;
+  },
+
+  async reply(channel, target, text) {
+    const r = target.replyId
+      ? await graph('POST', `${v()}/${target.replyId}/replies`, { message: text, access_token: channel.access_token })
+      : await graph('POST', `${v()}/${target.postId}/comments`, { message: text, access_token: channel.access_token });
+    return r.id as string;
+  },
+
+  async hideReply(channel, replyId, hide) {
+    await graph('POST', `${v()}/${replyId}`, { hide, access_token: channel.access_token });
   },
 
   async publishingLimit(channel) {

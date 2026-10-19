@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Copy, ExternalLink, Pencil, RefreshCw, Send, Trash2, FileText } from 'lucide-react';
+import { Copy, ExternalLink, Pencil, RefreshCw, Send, Trash2, FileText, MessageCircle } from 'lucide-react';
 import { api, fmtDateTime, type Post, type PostStatus } from '../api';
 import { useStore } from '../store';
-import { Button, ChannelAvatar, Empty, PageHeader, Spinner, StatusBadge, Tabs, useToast, Select } from '../components/ui';
+import { Button, ChannelAvatar, Empty, Modal, PageHeader, Spinner, StatusBadge, Tabs, useToast, Select } from '../components/ui';
+import Replies from '../components/Replies';
 import { MediaThumb } from '../components/MediaPicker';
 
 type Filter = 'upcoming' | 'draft' | 'published' | 'failed' | 'all';
@@ -23,6 +24,8 @@ export default function PostsPage() {
   const [channel, setChannel] = useState('');
   const [posts, setPosts] = useState<Post[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<Post | null>(null);
+  const [repliesFor, setRepliesFor] = useState<Post | null>(null);
 
   useEffect(() => {
     const qs = new URLSearchParams();
@@ -36,7 +39,8 @@ export default function PostsPage() {
 
   const act = async (p: Post, action: 'publish' | 'delete' | 'duplicate' | 'insights') => {
     if (action === 'publish' && !confirm(`Опубликовать сейчас в @${p.channel?.username}?`)) return;
-    if (action === 'delete' && !confirm(p.status === 'published' ? 'Удалить из панели? (в соцсети пост останется)' : 'Удалить пост?')) return;
+    if (action === 'delete' && p.status === 'published') return setDeleting(p);
+    if (action === 'delete' && !confirm('Удалить пост?')) return;
     setBusy(p.id + action);
     try {
       if (action === 'delete') await api.del(`/api/posts/${p.id}`);
@@ -135,6 +139,7 @@ export default function PostsPage() {
                         <Button size="sm" variant="ghost" icon={<ExternalLink className="size-4" />} title="Открыть" />
                       </a>
                     )}
+                    <Button size="sm" variant="ghost" icon={<MessageCircle className="size-4" />} title={p.channel?.provider === 'instagram' ? 'Комментарии' : 'Ответы'} onClick={() => setRepliesFor(p)} />
                     <Button size="sm" variant="ghost" loading={busy === p.id + 'insights'} icon={<RefreshCw className="size-4" />} title="Обновить статистику" onClick={() => act(p, 'insights')} />
                   </>
                 ) : (
@@ -150,6 +155,72 @@ export default function PostsPage() {
           ))}
         </div>
       )}
+      {repliesFor && <Replies post={repliesFor} onClose={() => setRepliesFor(null)} />}
+      {deleting && (
+        <DeleteDialog
+          post={deleting}
+          onClose={() => setDeleting(null)}
+          onDone={(msg) => {
+            setDeleting(null);
+            toast('ok', msg);
+            bump();
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function DeleteDialog({ post, onClose, onDone }: { post: Post; onClose: () => void; onDone: (msg: string) => void }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState<'local' | 'remote' | null>(null);
+  const isThreads = post.channel?.provider === 'threads';
+  const parts = post.options.threads?.thread?.length ?? 0;
+  const go = async (remote: boolean) => {
+    setBusy(remote ? 'remote' : 'local');
+    try {
+      await api.del(`/api/posts/${post.id}${remote ? '?remote=1' : ''}`);
+      onDone(remote ? 'Удалено из Threads и из панели' : 'Удалено из панели');
+    } catch (e: any) {
+      toast('error', e.message);
+      setBusy(null);
+    }
+  };
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Удалить опубликованный пост"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Отмена
+          </Button>
+          <Button loading={busy === 'local'} disabled={!!busy} onClick={() => go(false)}>
+            Только из панели
+          </Button>
+          {isThreads && (
+            <Button variant="danger" loading={busy === 'remote'} disabled={!!busy} onClick={() => go(true)}>
+              Удалить и из Threads
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <p className="line-clamp-3 rounded-lg bg-zinc-50 px-3 py-2 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">{post.content || '—'}</p>
+        <p>
+          <b>Только из панели</b> — пост останется в соцсети, пропадёт лишь из календаря и статистики.
+        </p>
+        {isThreads ? (
+          <p>
+            <b>Удалить и из Threads</b> — публикация исчезнет у подписчиков. Это необратимо.
+            {parts > 0 && <> Части цепочки ({parts}) — отдельные ответы, их Threads не удалит автоматически.</>}
+          </p>
+        ) : (
+          <p className="text-amber-700 dark:text-amber-300">Instagram API не позволяет удалять публикации — удалите пост в самом приложении Instagram.</p>
+        )}
+      </div>
+    </Modal>
   );
 }

@@ -145,9 +145,46 @@ export function toRefs(ids: string[]): MediaRef[] {
   });
 }
 
-export async function deleteMedia(id: string) {
+/** Неопубликованные посты, которые используют файл (в основном медиа или в частях цепочки) */
+export function mediaUsage(id: string) {
+  return db
+    .prepare(
+      `SELECT p.id, p.status, p.scheduled_at, p.content, c.provider, c.username FROM posts p JOIN channels c ON c.id = p.channel_id
+       WHERE p.status IN ('draft','scheduled','publishing','failed') AND (p.media LIKE ? OR p.options LIKE ?)`,
+    )
+    .all(`%${id}%`, `%${id}%`) as { id: string; status: string; scheduled_at: string | null; content: string; provider: string; username: string }[];
+}
+
+export class MediaInUseError extends Error {
+  usage: ReturnType<typeof mediaUsage>;
+  constructor(usage: ReturnType<typeof mediaUsage>) {
+    super(
+      `Файл используется в ${usage.length} неопубликованн${usage.length === 1 ? 'ом посте' : 'ых постах'}: ` +
+        usage.map((u) => `${u.provider}:@${u.username} (${u.status})`).join(', ') +
+        '. Удалите с force, чтобы убрать его и из этих постов.',
+    );
+    this.usage = usage;
+  }
+}
+
+/**
+ * Удаляет файл. Если он нужен неопубликованным постам — по умолчанию отказ;
+ * с force файл удаляется и вычищается из этих постов. Опубликованным постам файл уже не нужен.
+ */
+export async function deleteMedia(id: string, opts: { force?: boolean } = {}) {
   const m = getMedia(id);
+  const usage = mediaUsage(id);
+  if (usage.some((u) => u.status === 'publishing')) throw new Error('Файл прямо сейчас публикуется — попробуйте через минуту');
+  if (usage.length && !opts.force) throw new MediaInUseError(usage);
+  for (const u of usage) {
+    const row = db.prepare('SELECT media, options FROM posts WHERE id = ?').get(u.id) as { media: string; options: string };
+    const media = (JSON.parse(row.media) as MediaRef[]).filter((x) => x.id !== id);
+    const options = JSON.parse(row.options);
+    for (const part of options.threads?.thread ?? []) part.media = (part.media ?? []).filter((x: MediaRef) => x.id !== id);
+    db.prepare('UPDATE posts SET media = ?, options = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(media), JSON.stringify(options), now(), u.id);
+  }
   db.prepare('DELETE FROM media WHERE id = ?').run(id);
+  log('info', 'media', `Удалён файл ${m.original_name ?? m.filename}${usage.length ? ` (убран из постов: ${usage.length})` : ''}`);
   try {
     await unlink(join(UPLOAD_DIR, m.filename));
   } catch {}

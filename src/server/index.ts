@@ -22,10 +22,13 @@ import {
   refreshDueTokens,
   updateChannel,
 } from '../core/channels.ts';
-import { deleteMedia, listMedia, publicMedia, saveMedia } from '../core/media.ts';
+import { deleteMedia, listMedia, mediaUsage, MediaInUseError, publicMedia, saveMedia } from '../core/media.ts';
 import {
   createPosts,
   deletePost,
+  hideReply,
+  listReplies,
+  replyTo,
   duplicatePost,
   getPost,
   listPosts,
@@ -191,7 +194,8 @@ function page(title: string, msg: string) {
 
 /* ---------------------------------- Media --------------------------------- */
 
-app.get('/api/media', (c) => c.json(listMedia().map(publicMedia)));
+app.get('/api/media', (c) => c.json(listMedia().map((m) => ({ ...publicMedia(m), used_in: mediaUsage(m.id).length }))));
+app.get('/api/media/:id/usage', (c) => c.json(mediaUsage(c.req.param('id'))));
 
 app.post('/api/media', async (c) => {
   const body = await c.req.parseBody({ all: true });
@@ -203,7 +207,12 @@ app.post('/api/media', async (c) => {
 });
 
 app.delete('/api/media/:id', async (c) => {
-  await deleteMedia(c.req.param('id'));
+  try {
+    await deleteMedia(c.req.param('id'), { force: c.req.query('force') === '1' });
+  } catch (e) {
+    if (e instanceof MediaInUseError) return c.json({ error: e.message, usage: e.usage }, 409);
+    throw e;
+  }
   return c.json({ ok: true });
 });
 
@@ -252,8 +261,18 @@ app.post('/api/posts/validate', async (c) => {
 
 app.get('/api/posts/:id', (c) => c.json(getPost(c.req.param('id'))));
 app.put('/api/posts/:id', async (c) => c.json(updatePost(c.req.param('id'), await c.req.json())));
-app.delete('/api/posts/:id', (c) => {
-  deletePost(c.req.param('id'));
+app.delete('/api/posts/:id', async (c) => {
+  await deletePost(c.req.param('id'), { remote: c.req.query('remote') === '1' });
+  return c.json({ ok: true });
+});
+app.get('/api/posts/:id/replies', async (c) => c.json(await listReplies(c.req.param('id'))));
+app.post('/api/posts/:id/replies', async (c) => {
+  const { text, reply_id } = await c.req.json();
+  return c.json({ id: await replyTo(c.req.param('id'), text, reply_id) });
+});
+app.post('/api/posts/:id/replies/:rid/hide', async (c) => {
+  const { hide } = await c.req.json().catch(() => ({ hide: true }));
+  await hideReply(c.req.param('id'), c.req.param('rid'), hide !== false);
   return c.json({ ok: true });
 });
 app.post('/api/posts/:id/publish', async (c) => c.json(await publishPost(c.req.param('id'), { force: true })));
