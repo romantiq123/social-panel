@@ -1,6 +1,6 @@
 import { getSettings } from '../settings.ts';
 import type { ChannelRow, ProviderApi, PublishInput, ReplyItem } from '../types.ts';
-import { graph, GraphError, sleep } from './graph.ts';
+import { graph, GraphError, sleep, withTransientRetry } from './graph.ts';
 import { redirectUri } from './threads.ts';
 
 // Instagram API with Instagram Login — не требует страницы Facebook
@@ -22,7 +22,7 @@ function creds() {
 
 async function waitContainer(id: string, token: string) {
   for (let i = 0; i < 100; i++) {
-    const r = await graph('GET', `${v()}/${id}`, { fields: 'status_code,status', access_token: token });
+    const r = await withTransientRetry(() => graph('GET', `${v()}/${id}`, { fields: 'status_code,status', access_token: token }));
     if (r.status_code === 'FINISHED' || r.status_code === 'PUBLISHED') return;
     if (r.status_code === 'ERROR' || r.status_code === 'EXPIRED') throw new GraphError(`Контейнер Instagram: ${r.status || r.status_code}`, 9004);
     await sleep(i < 5 ? 2000 : 5000);
@@ -133,7 +133,7 @@ export const instagram: ProviderApi = {
     }
 
     await waitContainer(creation, channel.access_token);
-    const pub = await graph('POST', `${v()}/${channel.external_id}/media_publish`, { creation_id: creation, access_token: channel.access_token });
+    const pub = await withTransientRetry(() => graph('POST', `${v()}/${channel.external_id}/media_publish`, { creation_id: creation, access_token: channel.access_token }));
     const id = pub.id as string;
 
     const warnings: string[] = [];

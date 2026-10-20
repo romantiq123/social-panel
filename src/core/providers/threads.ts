@@ -1,6 +1,6 @@
 import { getSettings } from '../settings.ts';
 import type { ChannelRow, ProviderApi, PublishInput, ReplyItem } from '../types.ts';
-import { graph, GraphError, sleep } from './graph.ts';
+import { graph, GraphError, sleep, withTransientRetry } from './graph.ts';
 
 const BASE = 'https://graph.threads.net';
 const v = () => `${BASE}/${getSettings().graph_version_threads}`;
@@ -25,7 +25,7 @@ function creds() {
 async function waitContainer(id: string, token: string) {
   // Видео обрабатывается до нескольких минут; картинки/текст — секунды
   for (let i = 0; i < 100; i++) {
-    const r = await graph('GET', `${v()}/${id}`, { fields: 'status,error_message', access_token: token });
+    const r = await withTransientRetry(() => graph('GET', `${v()}/${id}`, { fields: 'status,error_message', access_token: token }));
     if (r.status === 'FINISHED' || r.status === 'PUBLISHED') return;
     if (r.status === 'ERROR' || r.status === 'EXPIRED') throw new GraphError(`Контейнер Threads: ${r.error_message || r.status}`, 9004);
     await sleep(i < 5 ? 2000 : 5000);
@@ -69,7 +69,7 @@ async function publishPart(
     creation = await createContainer(ch, { media_type: 'CAROUSEL', children: children.join(','), text, ...extra });
   }
   await waitContainer(creation, ch.access_token);
-  const pub = await graph('POST', `${v()}/${ch.external_id}/threads_publish`, { creation_id: creation, access_token: ch.access_token });
+  const pub = await withTransientRetry(() => graph('POST', `${v()}/${ch.external_id}/threads_publish`, { creation_id: creation, access_token: ch.access_token }));
   return pub.id as string;
 }
 

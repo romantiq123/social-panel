@@ -51,3 +51,20 @@ export async function graph<T = any>(method: 'GET' | 'POST' | 'DELETE', url: str
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Meta иногда не сразу «видит» только что созданный контейнер и отвечает
+ * «The media with id … cannot be found» / «Media ID is not available». Это временно —
+ * ждём несколько секунд и повторяем, вместо того чтобы откладывать пост на минуты.
+ */
+const TRANSIENT = /cannot be found|does not exist|not available|not ready|try again/i;
+export async function withTransientRetry<T>(fn: () => Promise<T>, attempts = 6, delayMs = 5000): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      if (i >= attempts - 1 || !(e instanceof GraphError) || e.isAuth || !TRANSIENT.test(e.message)) throw e;
+      await sleep(delayMs);
+    }
+  }
+}
