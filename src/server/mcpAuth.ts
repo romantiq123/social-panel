@@ -44,17 +44,17 @@ interface ClientRow {
   last_used_at: string | null;
 }
 
-const getClient = (id: string) => db.prepare('SELECT * FROM oauth_clients WHERE id = ?').get(id) as unknown as ClientRow | undefined;
+const getClient = async (id: string) => (await db.prepare('SELECT * FROM oauth_clients WHERE id = ?').get(id)) as ClientRow | undefined;
 
 /** Проверка access-токена для /mcp */
-export function verifyAccessToken(header: string | undefined): boolean {
+export async function verifyAccessToken(header: string | undefined): Promise<boolean> {
   const t = header?.replace(/^Bearer\s+/i, '');
   if (!t) return false;
-  const row = db.prepare(`SELECT client_id FROM oauth_tokens WHERE hash = ? AND kind = 'access' AND expires_at > ?`).get(sha(t), now()) as
+  const row = (await db.prepare(`SELECT client_id FROM oauth_tokens WHERE hash = ? AND kind = 'access' AND expires_at > ?`).get(sha(t), now())) as
     | { client_id: string }
     | undefined;
   if (!row) return false;
-  db.prepare('UPDATE oauth_clients SET last_used_at = ? WHERE id = ?').run(now(), row.client_id);
+  await db.prepare('UPDATE oauth_clients SET last_used_at = ? WHERE id = ?').run(now(), row.client_id);
   return true;
 }
 
@@ -62,24 +62,24 @@ export function verifyAccessToken(header: string | undefined): boolean {
 export const wwwAuthenticate = (c: Context, invalid: boolean) =>
   `Bearer resource_metadata="${baseUrl(c)}/.well-known/oauth-protected-resource"${invalid ? ', error="invalid_token"' : ''}`;
 
-export function listClients() {
-  return (db.prepare('SELECT id, name, redirect_uris, created_at, last_used_at FROM oauth_clients ORDER BY COALESCE(last_used_at, created_at) DESC').all() as unknown as ClientRow[]).map(
+export async function listClients() {
+  return ((await db.prepare('SELECT id, name, redirect_uris, created_at, last_used_at FROM oauth_clients ORDER BY COALESCE(last_used_at, created_at) DESC').all()) as ClientRow[]).map(
     (c) => ({ ...c, redirect_uris: JSON.parse(c.redirect_uris) as string[] }),
   );
 }
-export function revokeClient(id: string) {
-  db.prepare('DELETE FROM oauth_clients WHERE id = ?').run(id);
+export async function revokeClient(id: string) {
+  await db.prepare('DELETE FROM oauth_clients WHERE id = ?').run(id);
 }
 
-function issueTokens(clientId: string, scope: string | null) {
-  db.prepare('DELETE FROM oauth_tokens WHERE expires_at < ?').run(now());
-  db.prepare('DELETE FROM oauth_codes WHERE expires_at < ?').run(now());
+async function issueTokens(clientId: string, scope: string | null) {
+  await db.prepare('DELETE FROM oauth_tokens WHERE expires_at < ?').run(now());
+  await db.prepare('DELETE FROM oauth_codes WHERE expires_at < ?').run(now());
   const access = newToken('spa_');
   const refresh = newToken('spr_');
   const ins = db.prepare('INSERT INTO oauth_tokens (hash, kind, client_id, scope, expires_at, created_at) VALUES (?,?,?,?,?,?)');
-  ins.run(sha(access), 'access', clientId, scope, inSec(ACCESS_TTL), now());
-  ins.run(sha(refresh), 'refresh', clientId, scope, inSec(REFRESH_TTL), now());
-  db.prepare('UPDATE oauth_clients SET last_used_at = ? WHERE id = ?').run(now(), clientId);
+  await ins.run(sha(access), 'access', clientId, scope, inSec(ACCESS_TTL), now());
+  await ins.run(sha(refresh), 'refresh', clientId, scope, inSec(REFRESH_TTL), now());
+  await db.prepare('UPDATE oauth_clients SET last_used_at = ? WHERE id = ?').run(now(), clientId);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, refresh_token: refresh, scope: scope ?? 'mcp' };
 }
 
@@ -162,20 +162,20 @@ mcpAuth.post('/mcp-auth/register', async (c) => {
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) return oauthError(c, 'invalid_redirect_uri', 'redirect_uri должен быть https (или http://localhost)');
   }
-  const count = (db.prepare('SELECT COUNT(*) AS n FROM oauth_clients').get() as { n: number }).n;
+  const count = ((await db.prepare('SELECT COUNT(*)::int AS n FROM oauth_clients').get()) as { n: number }).n;
   if (count >= MAX_CLIENTS) {
     // вытесняем самый старый неиспользованный
-    const old = db.prepare('SELECT id FROM oauth_clients WHERE last_used_at IS NULL ORDER BY created_at LIMIT 1').get() as { id: string } | undefined;
+    const old = (await db.prepare('SELECT id FROM oauth_clients WHERE last_used_at IS NULL ORDER BY created_at LIMIT 1').get()) as { id: string } | undefined;
     if (!old) return oauthError(c, 'invalid_client_metadata', 'Слишком много зарегистрированных клиентов — отзовите лишние в Настройках');
-    revokeClient(old.id);
+    await revokeClient(old.id);
   }
 
   const method = body.token_endpoint_auth_method ?? 'none';
   const id = 'spc_' + randomBytes(12).toString('base64url');
   const secret = method === 'none' ? null : newToken('sps_');
   const name = String(body.client_name ?? 'MCP client').slice(0, 100);
-  db.prepare('INSERT INTO oauth_clients (id, secret_hash, name, redirect_uris, created_at) VALUES (?,?,?,?,?)').run(id, secret ? sha(secret) : null, name, JSON.stringify(uris), now());
-  log('info', 'mcp-oauth', `Зарегистрирован клиент «${name}»`);
+  await db.prepare('INSERT INTO oauth_clients (id, secret_hash, name, redirect_uris, created_at) VALUES (?,?,?,?,?)').run(id, secret ? sha(secret) : null, name, JSON.stringify(uris), now());
+  await log('info', 'mcp-oauth', `Зарегистрирован клиент «${name}»`);
   return c.json(
     {
       client_id: id,
@@ -205,9 +205,9 @@ function redirectWith(uri: string, params: Record<string, string | undefined>) {
 }
 
 /** Ошибки, при которых нельзя редиректить (клиент/redirect_uri не доверенные) */
-function checkClient(p: AuthParams): { client: ClientRow } | { error: string } {
+async function checkClient(p: AuthParams): Promise<{ client: ClientRow } | { error: string }> {
   if (!p.client_id) return { error: 'Не передан client_id' };
-  const client = getClient(p.client_id);
+  const client = await getClient(p.client_id);
   if (!client) return { error: 'Неизвестный клиент. Удалите коннектор в Claude и добавьте заново.' };
   const uris = JSON.parse(client.redirect_uris) as string[];
   if (!p.redirect_uri || !uris.includes(p.redirect_uri)) return { error: 'redirect_uri не совпадает с зарегистрированным' };
@@ -253,10 +253,10 @@ ${loggedIn ? '' : '<input type="password" name="password" placeholder="Паро�
   );
 }
 
-mcpAuth.get('/mcp-auth/authorize', (c) => {
+mcpAuth.get('/mcp-auth/authorize', async (c) => {
   const q = c.req.query();
   const p: AuthParams = Object.fromEntries(AUTH_PARAMS.map((k) => [k, q[k]]));
-  const chk = checkClient(p);
+  const chk = await checkClient(p);
   if ('error' in chk) return c.html(page('Ошибка', `<h1>Ошибка авторизации</h1><p>${esc(chk.error)}</p>`), 400);
   if (p.response_type !== 'code') return c.redirect(redirectWith(p.redirect_uri!, { error: 'unsupported_response_type', state: p.state }));
   if (!p.code_challenge || p.code_challenge_method !== 'S256')
@@ -267,7 +267,7 @@ mcpAuth.get('/mcp-auth/authorize', (c) => {
 mcpAuth.post('/mcp-auth/authorize', async (c) => {
   const form = await c.req.parseBody();
   const p: AuthParams = Object.fromEntries(AUTH_PARAMS.map((k) => [k, typeof form[k] === 'string' ? (form[k] as string) : undefined]));
-  const chk = checkClient(p);
+  const chk = await checkClient(p);
   if ('error' in chk) return c.html(page('Ошибка', `<h1>Ошибка авторизации</h1><p>${esc(chk.error)}</p>`), 400);
   if (!p.code_challenge || p.code_challenge_method !== 'S256') return c.redirect(redirectWith(p.redirect_uri!, { error: 'invalid_request', state: p.state }));
   if (!safeEq(String(form.csrf ?? ''), csrfFor(p))) return c.html(page('Ошибка', '<h1>Сессия устарела</h1><p>Начните подключение заново.</p>'), 400);
@@ -285,7 +285,7 @@ mcpAuth.post('/mcp-auth/authorize', async (c) => {
   }
 
   const code = newToken('spk_');
-  db.prepare('INSERT INTO oauth_codes (hash, client_id, redirect_uri, challenge, scope, resource, expires_at) VALUES (?,?,?,?,?,?,?)').run(
+  await db.prepare('INSERT INTO oauth_codes (hash, client_id, redirect_uri, challenge, scope, resource, expires_at) VALUES (?,?,?,?,?,?,?)').run(
     sha(code),
     chk.client.id,
     p.redirect_uri!,
@@ -294,7 +294,7 @@ mcpAuth.post('/mcp-auth/authorize', async (c) => {
     p.resource ?? null,
     inSec(CODE_TTL),
   );
-  log('info', 'mcp-oauth', `Доступ выдан клиенту «${chk.client.name}»`);
+  await log('info', 'mcp-oauth', `Доступ выдан клиенту «${chk.client.name}»`);
   return c.redirect(redirectWith(p.redirect_uri!, { code, state: p.state }));
 });
 
@@ -308,7 +308,7 @@ async function readBody(c: Context): Promise<Record<string, string>> {
 }
 
 /** Аутентификация клиента: публичные — только client_id, конфиденциальные — секрет */
-function authClient(c: Context, body: Record<string, string>): ClientRow | null {
+async function authClient(c: Context, body: Record<string, string>): Promise<ClientRow | null> {
   let id = body.client_id;
   let secret = body.client_secret;
   const basic = c.req.header('authorization')?.match(/^Basic\s+(.+)$/i);
@@ -317,7 +317,7 @@ function authClient(c: Context, body: Record<string, string>): ClientRow | null 
     id = decodeURIComponent(u);
     secret = decodeURIComponent(s ?? '');
   }
-  const client = id ? getClient(id) : undefined;
+  const client = id ? await getClient(id) : undefined;
   if (!client) return null;
   if (client.secret_hash && !(secret && safeEq(sha(secret), client.secret_hash))) return null;
   return client;
@@ -325,32 +325,32 @@ function authClient(c: Context, body: Record<string, string>): ClientRow | null 
 
 mcpAuth.post('/mcp-auth/token', async (c) => {
   const body = await readBody(c);
-  const client = authClient(c, body);
+  const client = await authClient(c, body);
   if (!client) return oauthError(c, 'invalid_client', 'Клиент не найден или неверный секрет', 401);
 
   if (body.grant_type === 'authorization_code') {
     if (!body.code || !body.code_verifier) return oauthError(c, 'invalid_request', 'Нужны code и code_verifier');
-    const row = db.prepare('SELECT * FROM oauth_codes WHERE hash = ?').get(sha(body.code)) as
+    const row = (await db.prepare('SELECT * FROM oauth_codes WHERE hash = ?').get(sha(body.code))) as
       | { client_id: string; redirect_uri: string; challenge: string; scope: string | null; expires_at: string }
       | undefined;
     // код одноразовый — удаляем сразу
-    db.prepare('DELETE FROM oauth_codes WHERE hash = ?').run(sha(body.code));
+    await db.prepare('DELETE FROM oauth_codes WHERE hash = ?').run(sha(body.code));
     if (!row || row.expires_at < now() || row.client_id !== client.id) return oauthError(c, 'invalid_grant', 'Код недействителен или истёк');
     if (body.redirect_uri && body.redirect_uri !== row.redirect_uri) return oauthError(c, 'invalid_grant', 'redirect_uri не совпадает');
     const challenge = createHash('sha256').update(body.code_verifier).digest('base64url');
     if (!safeEq(challenge, row.challenge)) return oauthError(c, 'invalid_grant', 'PKCE: code_verifier не подходит');
-    return c.json(issueTokens(client.id, row.scope), 200, { 'Cache-Control': 'no-store' });
+    return c.json(await issueTokens(client.id, row.scope), 200, { 'Cache-Control': 'no-store' });
   }
 
   if (body.grant_type === 'refresh_token') {
     if (!body.refresh_token) return oauthError(c, 'invalid_request', 'Нужен refresh_token');
     const h = sha(body.refresh_token);
-    const row = db.prepare(`SELECT client_id, scope, expires_at FROM oauth_tokens WHERE hash = ? AND kind = 'refresh'`).get(h) as
+    const row = (await db.prepare(`SELECT client_id, scope, expires_at FROM oauth_tokens WHERE hash = ? AND kind = 'refresh'`).get(h)) as
       | { client_id: string; scope: string | null; expires_at: string }
       | undefined;
     if (!row || row.expires_at < now() || row.client_id !== client.id) return oauthError(c, 'invalid_grant', 'refresh_token недействителен');
-    db.prepare('DELETE FROM oauth_tokens WHERE hash = ?').run(h); // ротация
-    return c.json(issueTokens(client.id, row.scope), 200, { 'Cache-Control': 'no-store' });
+    await db.prepare('DELETE FROM oauth_tokens WHERE hash = ?').run(h); // ротация
+    return c.json(await issueTokens(client.id, row.scope), 200, { 'Cache-Control': 'no-store' });
   }
 
   return oauthError(c, 'unsupported_grant_type', `grant_type ${body.grant_type} не поддерживается`);
@@ -358,6 +358,6 @@ mcpAuth.post('/mcp-auth/token', async (c) => {
 
 mcpAuth.post('/mcp-auth/revoke', async (c) => {
   const body = await readBody(c);
-  if (body.token) db.prepare('DELETE FROM oauth_tokens WHERE hash = ?').run(sha(body.token));
+  if (body.token) await db.prepare('DELETE FROM oauth_tokens WHERE hash = ?').run(sha(body.token));
   return c.body(null, 200);
 });

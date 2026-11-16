@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { db } from '../core/db.ts';
 import { getSettings } from '../core/settings.ts';
+import { publicFileUrl } from '../core/storage.ts';
 import { listChannels, publicChannel, refreshChannelToken, refreshDueTokens, updateChannel } from '../core/channels.ts';
 import { deleteMedia, importMedia, listMedia, mediaUsage, publicMedia } from '../core/media.ts';
 import {
@@ -48,8 +49,8 @@ const run = <A,>(fn: (a: A) => unknown | Promise<unknown>) => async (a: A) => {
 };
 
 /** Канал по id, "threads:username", "@username" или "username" (если однозначно) */
-function resolveChannel(ref: string): ChannelRow {
-  const all = listChannels();
+async function resolveChannel(ref: string): Promise<ChannelRow> {
+  const all = await listChannels();
   const byId = all.find((c) => c.id === ref);
   if (byId) return byId;
   const m = ref.match(/^(threads|instagram|ig|th):@?(.+)$/i);
@@ -101,23 +102,27 @@ const igOpts = z
   })
   .optional();
 
-function buildOptions(threads?: z.infer<typeof threadsOpts>, instagram?: z.infer<typeof igOpts>, base: PostOptions = {}): PostOptions {
+async function buildOptions(threads?: z.infer<typeof threadsOpts>, instagram?: z.infer<typeof igOpts>, base: PostOptions = {}): Promise<PostOptions> {
   const out: PostOptions = { ...base };
   if (threads) {
     const { thread, ...rest } = threads;
+    let parts: { text: string; media: MediaRef[] }[] | undefined;
+    if (thread) {
+      parts = [];
+      for (const t of thread) {
+        const media: MediaRef[] = [];
+        for (const id of t.media_ids ?? []) {
+          const row = (await db.prepare('SELECT id, kind, filename FROM media WHERE id=?').get(id)) as (MediaRef & { filename: string }) | undefined;
+          if (!row) throw new Error(`Медиа не найдено: ${id}`);
+          media.push({ id: row.id, kind: row.kind, url: publicFileUrl(row.filename) } as MediaRef);
+        }
+        parts.push({ text: t.text, media });
+      }
+    }
     out.threads = {
       ...base.threads,
       ...rest,
-      ...(thread && {
-        thread: thread.map((t) => ({
-          text: t.text,
-          media: (t.media_ids ?? []).map((id): MediaRef => {
-            const row = db.prepare('SELECT id, kind, filename FROM media WHERE id=?').get(id) as (MediaRef & { filename: string }) | undefined;
-            if (!row) throw new Error(`Медиа не найдено: ${id}`);
-            return { id: row.id, kind: row.kind, url: `/media/${row.filename}` } as MediaRef;
-          }),
-        })),
-      }),
+      ...(parts && { thread: parts }),
     };
   }
   if (instagram) out.instagram = { ...base.instagram, ...instagram };
@@ -129,7 +134,7 @@ function buildOptions(threads?: z.infer<typeof threadsOpts>, instagram?: z.infer
 server.registerTool(
   'status',
   { title: 'Статус панели', description: 'Проверка настроек: публичный URL, ключи приложений, часовой пояс, статистика постов.' },
-  run(() => {
+  run(async () => {
     const s = getSettings();
     return {
       public_base_url: s.public_base_url || null,
@@ -138,9 +143,9 @@ server.registerTool(
       instagram_app_configured: !!(s.instagram_app_id && s.instagram_app_secret),
       timezone: s.timezone,
       now_local: formatLocal(new Date().toISOString()),
-      channels: listChannels().length,
-      posts: statsSummary().counts,
-      note: 'Публикация по расписанию выполняется сервером панели (npm start) — он должен быть запущен.',
+      channels: (await listChannels()).length,
+      posts: (await statsSummary()).counts,
+      note: 'Публикация по расписанию выполняется сервером панели (cron раз в минуту).',
     };
   }),
 );
@@ -148,8 +153,8 @@ server.registerTool(
 server.registerTool(
   'list_channels',
   { title: 'Каналы', description: 'Подключённые аккаунты Threads/Instagram, статус токена и дни до его истечения.' },
-  run(() =>
-    listChannels().map((c) => {
+  run(async () =>
+    (await listChannels()).map((c) => {
       const p = publicChannel(c);
       return {
         id: p.id,
@@ -181,8 +186,8 @@ server.registerTool(
 server.registerTool(
   'list_media',
   { title: 'Библиотека медиа', description: 'Последние файлы в библиотеке.', inputSchema: { limit: z.number().int().optional() } },
-  run(({ limit }: { limit?: number }) =>
-    listMedia()
+  run(async ({ limit }: { limit?: number }) =>
+    (await listMedia())
       .slice(0, limit ?? 30)
       .map((m) => ({ id: m.id, kind: m.kind, name: m.original_name, created_at: m.created_at, url: publicMedia(m).public_url })),
   ),
@@ -201,9 +206,10 @@ server.registerTool(
       instagram: igOpts,
     },
   },
-  run(({ provider, content, media_ids, threads, instagram }: any) => {
-    const refs = (media_ids ?? []).map((id: string) => db.prepare('SELECT id, kind FROM media WHERE id=?').get(id));
-    const errors = validatePost(provider, content, refs, buildOptions(threads, instagram));
+  run(async ({ provider, content, media_ids, threads, instagram }: any) => {
+    const refs: any[] = [];
+    for (const id of media_ids ?? []) refs.push(await db.prepare('SELECT id, kind FROM media WHERE id=?').get(id));
+    const errors = validatePost(provider, content, refs.filter(Boolean), await buildOptions(threads, instagram));
     return errors.length ? { valid: false, errors } : { valid: true };
   }),
 );
@@ -226,31 +232,32 @@ server.registerTool(
     },
   },
   run(async (a: any) => {
-    const chans: ChannelRow[] = a.channels.map(resolveChannel);
+    const chans: ChannelRow[] = [];
+    for (const ref of a.channels as string[]) chans.push(await resolveChannel(ref));
     const overrides: Record<string, string> = {};
-    for (const [k, v] of Object.entries((a.overrides ?? {}) as Record<string, string>)) overrides[resolveChannel(k).id] = v;
-    const options = buildOptions(a.threads, a.instagram);
+    for (const [k, v] of Object.entries((a.overrides ?? {}) as Record<string, string>)) overrides[(await resolveChannel(k)).id] = v;
+    const options = await buildOptions(a.threads, a.instagram);
 
     // next_slot: у каждого канала свой слот → создаём по одному
     if (a.next_slot) {
       const out: PostView[] = [];
       for (const c of chans) {
         out.push(
-          ...createPosts({
+          ...(await createPosts({
             channel_ids: [c.id],
             content: overrides[c.id] ?? a.content,
             media: a.media_ids,
             options,
-            scheduled_at: nextFreeSlot(c.id),
+            scheduled_at: await nextFreeSlot(c.id),
             status: 'scheduled',
-          }),
+          })),
         );
       }
       return out.map(brief);
     }
     const scheduled_at = a.schedule_at ? parseWhen(a.schedule_at) : null;
     if (scheduled_at && Date.parse(scheduled_at) < Date.now()) throw new Error(`Время в прошлом: ${formatLocal(scheduled_at)}`);
-    return createPosts({
+    return (await createPosts({
       channel_ids: chans.map((c) => c.id),
       content: a.content,
       overrides,
@@ -258,7 +265,7 @@ server.registerTool(
       options,
       scheduled_at,
       status: scheduled_at ? 'scheduled' : 'draft',
-    }).map(brief);
+    })).map(brief);
   }),
 );
 
@@ -276,10 +283,10 @@ server.registerTool(
       schedule_at: z.string().nullable().optional().describe('null — снять с расписания (станет черновиком)'),
     },
   },
-  run((a: any) => {
-    const cur = getPost(a.id);
+  run(async (a: any) => {
+    const cur = await getPost(a.id);
     const patch: any = { content: a.content, media: a.media_ids };
-    if (a.threads || a.instagram) patch.options = buildOptions(a.threads, a.instagram, cur.options);
+    if (a.threads || a.instagram) patch.options = await buildOptions(a.threads, a.instagram, cur.options);
     if (a.schedule_at === null) {
       patch.scheduled_at = null;
       patch.status = 'draft';
@@ -287,7 +294,7 @@ server.registerTool(
       patch.scheduled_at = parseWhen(a.schedule_at);
       patch.status = 'scheduled';
     }
-    return brief(updatePost(a.id, patch));
+    return brief(await updatePost(a.id, patch));
   }),
 );
 
@@ -298,10 +305,10 @@ server.registerTool(
     description: 'Ставит черновик в расписание: на конкретное время или в ближайший свободный слот.',
     inputSchema: { id: z.string(), at: z.string().optional(), next_slot: z.boolean().optional() },
   },
-  run(({ id, at, next_slot }: { id: string; at?: string; next_slot?: boolean }) => {
-    const p = getPost(id);
-    const when = next_slot || !at ? nextFreeSlot(p.channel_id) : parseWhen(at);
-    return brief(updatePost(id, { scheduled_at: when, status: 'scheduled' }));
+  run(async ({ id, at, next_slot }: { id: string; at?: string; next_slot?: boolean }) => {
+    const p = await getPost(id);
+    const when = next_slot || !at ? await nextFreeSlot(p.channel_id) : parseWhen(at);
+    return brief(await updatePost(id, { scheduled_at: when, status: 'scheduled' }));
   }),
 );
 
@@ -328,18 +335,18 @@ server.registerTool(
       limit: z.number().int().optional(),
     },
   },
-  run((a: any) =>
-    listPosts({
+  run(async (a: any) =>
+    (await listPosts({
       status: a.status,
-      channel_id: a.channel ? resolveChannel(a.channel).id : undefined,
+      channel_id: a.channel ? (await resolveChannel(a.channel)).id : undefined,
       from: a.from ? parseWhen(a.from) : undefined,
       to: a.to ? parseWhen(a.to) : undefined,
       limit: a.limit ?? 50,
-    }).map(brief),
+    })).map(brief),
   ),
 );
 
-server.registerTool('get_post', { title: 'Пост', description: 'Полная информация о посте.', inputSchema: { id: z.string() } }, run(({ id }: { id: string }) => brief(getPost(id))));
+server.registerTool('get_post', { title: 'Пост', description: 'Полная информация о посте.', inputSchema: { id: z.string() } }, run(async ({ id }: { id: string }) => brief(await getPost(id))));
 
 server.registerTool(
   'delete_post',
@@ -358,7 +365,7 @@ server.registerTool(
 server.registerTool(
   'duplicate_post',
   { title: 'Дублировать пост', description: 'Создаёт черновик-копию поста (текст, медиа, опции).', inputSchema: { id: z.string() } },
-  run(({ id }: { id: string }) => brief(duplicatePost(id))),
+  run(async ({ id }: { id: string }) => brief(await duplicatePost(id))),
 );
 
 server.registerTool(
@@ -396,7 +403,7 @@ server.registerTool(
     description: 'Задаёт время публикаций канала для очереди (next_slot), формат HH:mm в часовом поясе панели.',
     inputSchema: { channel: z.string(), slots: z.array(z.string().regex(/^\d{2}:\d{2}$/)) },
   },
-  run(({ channel, slots }: { channel: string; slots: string[] }) => JSON.parse(updateChannel(resolveChannel(channel).id, { time_slots: slots }).time_slots)),
+  run(async ({ channel, slots }: { channel: string; slots: string[] }) => JSON.parse((await updateChannel((await resolveChannel(channel)).id, { time_slots: slots })).time_slots)),
 );
 
 server.registerTool(
@@ -435,8 +442,8 @@ server.registerTool(
 server.registerTool(
   'next_slot',
   { title: 'Свободный слот', description: 'Ближайшее свободное время по расписанию канала.', inputSchema: { channel: z.string() } },
-  run(({ channel }: { channel: string }) => {
-    const at = nextFreeSlot(resolveChannel(channel).id);
+  run(async ({ channel }: { channel: string }) => {
+    const at = await nextFreeSlot((await resolveChannel(channel)).id);
     return { at, local: formatLocal(at) };
   }),
 );
@@ -450,9 +457,9 @@ server.registerTool(
 server.registerTool(
   'stats_summary',
   { title: 'Сводка', description: 'Суммарные метрики по каналам за N дней.', inputSchema: { days: z.number().int().optional() } },
-  run(({ days }: { days?: number }) => {
-    const s = statsSummary(days ?? 30);
-    const names = new Map(listChannels().map((c) => [c.id, `${c.provider}:@${c.username}`]));
+  run(async ({ days }: { days?: number }) => {
+    const s = await statsSummary(days ?? 30);
+    const names = new Map((await listChannels()).map((c) => [c.id, `${c.provider}:@${c.username}`]));
     return { ...s, byChannel: Object.fromEntries(Object.entries(s.byChannel).map(([k, v]) => [names.get(k) ?? k, v])) };
   }),
 );
@@ -466,7 +473,7 @@ server.registerTool(
   },
   run(async ({ channel }: { channel?: string }) => {
     if (channel) {
-      const c = await refreshChannelToken(resolveChannel(channel).id);
+      const c = await refreshChannelToken((await resolveChannel(channel)).id);
       return publicChannel(c);
     }
     return await refreshDueTokens();
@@ -476,7 +483,7 @@ server.registerTool(
 server.registerTool(
   'recent_logs',
   { title: 'Журнал', description: 'Последние события: публикации, ошибки, токены.', inputSchema: { limit: z.number().int().optional() } },
-  run(({ limit }: { limit?: number }) => db.prepare('SELECT level, source, message, created_at FROM logs ORDER BY id DESC LIMIT ?').all(limit ?? 30)),
+  run(async ({ limit }: { limit?: number }) => await db.prepare('SELECT level, source, message, created_at FROM logs ORDER BY id DESC LIMIT ?').all(limit ?? 30)),
 );
 
 return server;

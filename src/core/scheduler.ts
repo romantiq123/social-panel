@@ -1,35 +1,33 @@
 import { log } from './db.ts';
 import { refreshDueTokens } from './channels.ts';
 import { publishDue, recoverStuck, refreshRecentInsights } from './posts.ts';
-
-let busy = false;
+import { getInternal, setInternal } from './settings.ts';
 
 async function safe(name: string, fn: () => Promise<unknown>) {
   try {
     await fn();
   } catch (e: any) {
-    log('error', 'scheduler', `${name}: ${e.message}`);
+    await log('error', 'scheduler', `${name}: ${e.message}`);
   }
 }
 
-export function startScheduler() {
-  recoverStuck();
+const HOUR = 3_600_000;
 
-  // Публикация по расписанию — каждые 20 сек
-  setInterval(async () => {
-    if (busy) return;
-    busy = true;
-    await safe('publish', publishDue);
-    busy = false;
-  }, 20_000);
+/** Выполняет задачу, если с прошлого запуска прошло больше `every` мс (отметка хранится в settings) */
+async function every(key: string, everyMs: number, fn: () => Promise<unknown>) {
+  const last = Number(getInternal(`last_${key}`) ?? 0);
+  if (Date.now() - last < everyMs) return;
+  await setInternal(`last_${key}`, String(Date.now()));
+  await safe(key, fn);
+}
 
-  // Токены — при старте и каждые 6 часов
-  const tokens = () => safe('tokens', refreshDueTokens);
-  setTimeout(tokens, 5_000);
-  setInterval(tokens, 6 * 3_600_000);
-
-  // Статистика — раз в 3 часа
-  setInterval(() => safe('insights', () => refreshRecentInsights()), 3 * 3_600_000);
-
-  log('info', 'scheduler', 'Планировщик запущен');
+/**
+ * Один «тик» планировщика. На Vercel его раз в минуту дёргает pg_cron из Supabase (GET /api/cron/tick),
+ * локально — setInterval в src/server/index.ts.
+ */
+export async function tick() {
+  await safe('recover', recoverStuck);
+  await safe('publish', publishDue);
+  await every('tokens', 6 * HOUR, refreshDueTokens);
+  await every('insights', 3 * HOUR, () => refreshRecentInsights());
 }

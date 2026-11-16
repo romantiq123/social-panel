@@ -116,10 +116,16 @@ export const api = {
   put: <T>(url: string, body: unknown) => req<T>('PUT', url, body),
   patch: <T>(url: string, body: unknown) => req<T>('PATCH', url, body),
   del: <T>(url: string) => req<T>('DELETE', url),
-  upload: (files: File[]) => {
-    const fd = new FormData();
-    for (const f of files) fd.append('file', f);
-    return req<Media[]>('POST', '/api/media', fd);
+  /** Файл идёт напрямую в Supabase Storage по подписанному URL (у Vercel лимит тела запроса 4.5 МБ) */
+  upload: async (files: File[]) => {
+    const out: Media[] = [];
+    for (const f of files) {
+      const { path, signed_url } = await req<{ path: string; signed_url: string }>('POST', '/api/media/upload-url', { name: f.name });
+      const put = await fetch(signed_url, { method: 'PUT', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream', 'x-upsert': 'true' } });
+      if (!put.ok) throw new ApiError(`Загрузка ${f.name}: HTTP ${put.status}`, put.status);
+      out.push(await req<Media>('POST', '/api/media/finalize', { path, name: f.name, type: f.type, size: f.size }));
+    }
+    return out;
   },
 };
 

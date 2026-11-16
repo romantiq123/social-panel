@@ -1,17 +1,44 @@
-import { ROOT } from './paths.ts';
-import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import './paths.ts';
+import postgres from 'postgres';
 
-// На Railway сюда монтируется volume (DATA_DIR=/data)
-export const DATA_DIR = process.env.DATA_DIR || join(ROOT, 'data');
-export const UPLOAD_DIR = join(DATA_DIR, 'uploads');
-for (const dir of [DATA_DIR, UPLOAD_DIR]) if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+/**
+ * Postgres (Supabase). Строку подключения даёт интеграция Supabase ↔ Vercel (POSTGRES_URL),
+ * локально — DATABASE_URL в .env.
+ * API похоже на старый node:sqlite (db.prepare(sql).get/all/run), только всё асинхронно.
+ */
+const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+if (!url) throw new Error('Не задан DATABASE_URL / POSTGRES_URL');
 
-export const db = new DatabaseSync(join(DATA_DIR, 'panel.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
+// prepare:false — нужно для транзакционного пулера Supabase (порт 6543)
+export const sql = postgres(url, {
+  prepare: false,
+  max: process.env.VERCEL ? 3 : 10,
+  idle_timeout: 20,
+  connect_timeout: 15,
+  ssl: /localhost|127\.0\.0\.1/.test(url) ? false : 'require',
+  onnotice: () => {},
+});
 
-db.exec(`
+/** SQLite-плейсхолдеры `?` → `$1, $2…` */
+function toPg(q: string) {
+  let i = 0;
+  return q.replace(/\?/g, () => `$${++i}`);
+}
+const clean = (args: unknown[]) => args.map((a) => (a === undefined ? null : a)) as any[];
+
+export const db = {
+  prepare(q: string) {
+    const text = toPg(q);
+    return {
+      all: async (...args: unknown[]): Promise<any[]> => [...(await sql.unsafe(text, clean(args)))],
+      get: async (...args: unknown[]): Promise<any> => (await sql.unsafe(text, clean(args)))[0],
+      run: async (...args: unknown[]) => ({ changes: (await sql.unsafe(text, clean(args))).count }),
+    };
+  },
+  exec: (q: string) => sql.unsafe(q),
+};
+
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -76,7 +103,6 @@ CREATE TABLE IF NOT EXISTS signatures (
   created_at TEXT NOT NULL
 );
 
--- OAuth 2.1 для удалённого MCP (Claude connectors). Токены храним только хэшами.
 CREATE TABLE IF NOT EXISTS oauth_clients (
   id            TEXT PRIMARY KEY,
   secret_hash   TEXT,
@@ -106,7 +132,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS logs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  id         BIGSERIAL PRIMARY KEY,
   level      TEXT NOT NULL,
   source     TEXT NOT NULL,
   message    TEXT NOT NULL,
@@ -114,27 +140,33 @@ CREATE TABLE IF NOT EXISTS logs (
   post_id    TEXT,
   created_at TEXT NOT NULL
 );
-`);
+CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
+`;
+
+let ready: Promise<void> | null = null;
+/** Схема создаётся один раз на холодный старт */
+export function ensureSchema() {
+  ready ??= sql
+    .unsafe(SCHEMA)
+    .then(() => undefined)
+    .catch((e) => {
+      ready = null;
+      throw e;
+    });
+  return ready;
+}
 
 export const now = () => new Date().toISOString();
 export const uid = () => crypto.randomUUID();
 
-export function log(level: 'info' | 'warn' | 'error', source: string, message: string, ref: { channel_id?: string; post_id?: string } = {}) {
-  db.prepare('INSERT INTO logs (level, source, message, channel_id, post_id, created_at) VALUES (?,?,?,?,?,?)')
-    .run(level, source, message, ref.channel_id ?? null, ref.post_id ?? null, now());
+export async function log(level: 'info' | 'warn' | 'error', source: string, message: string, ref: { channel_id?: string; post_id?: string } = {}) {
   // stdout зарезервирован под MCP-протокол, поэтому только stderr
   console.error(`[${level}] ${source}: ${message}`);
-}
-
-/** Атомарно выполняет fn в транзакции */
-export function tx<T>(fn: () => T): T {
-  db.exec('BEGIN IMMEDIATE');
   try {
-    const r = fn();
-    db.exec('COMMIT');
-    return r;
-  } catch (e) {
-    db.exec('ROLLBACK');
-    throw e;
+    await db
+      .prepare('INSERT INTO logs (level, source, message, channel_id, post_id, created_at) VALUES (?,?,?,?,?,?)')
+      .run(level, source, message, ref.channel_id ?? null, ref.post_id ?? null, now());
+  } catch (e: any) {
+    console.error('[log] не записан в БД:', e.message);
   }
 }

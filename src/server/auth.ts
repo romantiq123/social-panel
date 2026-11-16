@@ -5,22 +5,23 @@ import { getInternal, setInternal } from '../core/settings.ts';
 
 export const COOKIE = 'sp_session';
 
+/** Создаёт недостающие пароль/секрет сессии/MCP-токен. Вызывать после loadSettings() */
+export async function initAuth() {
+  if (!process.env.PANEL_PASSWORD && !getInternal('password')) await setInternal('password', randomBytes(9).toString('base64url'));
+  if (!getInternal('session_secret')) await setInternal('session_secret', randomBytes(32).toString('hex'));
+  if (!process.env.MCP_TOKEN && !getInternal('mcp_token')) await setInternal('mcp_token', 'spm_' + randomBytes(24).toString('base64url'));
+}
+
 export function ensurePassword(): string {
   if (process.env.PANEL_PASSWORD) return process.env.PANEL_PASSWORD;
-  let p = getInternal('password');
-  if (!p) {
-    p = randomBytes(9).toString('base64url');
-    setInternal('password', p);
-  }
+  const p = getInternal('password');
+  if (!p) throw new Error('Пароль панели не инициализирован');
   return p;
 }
 
 function secret() {
-  let s = getInternal('session_secret');
-  if (!s) {
-    s = randomBytes(32).toString('hex');
-    setInternal('session_secret', s);
-  }
+  const s = getInternal('session_secret');
+  if (!s) throw new Error('Секрет сессии не инициализирован');
   return s;
 }
 
@@ -53,20 +54,21 @@ export function recordFailure(ip: string) {
 }
 
 /** Bearer-токен для удалённого MCP (/mcp) */
-export function mcpToken(rotate = false): string {
+export function mcpToken(): string {
   if (process.env.MCP_TOKEN) return process.env.MCP_TOKEN;
-  let t = getInternal('mcp_token');
-  if (!t || rotate) {
-    t = 'spm_' + randomBytes(24).toString('base64url');
-    setInternal('mcp_token', t);
-  }
+  return getInternal('mcp_token') ?? '';
+}
+
+export async function rotateMcpToken() {
+  const t = 'spm_' + randomBytes(24).toString('base64url');
+  await setInternal('mcp_token', t);
   return t;
 }
 
 export function checkBearer(header: string | undefined) {
   const got = Buffer.from(header?.replace(/^Bearer\s+/i, '') ?? '');
   const want = Buffer.from(mcpToken());
-  return got.length === want.length && timingSafeEqual(got, want);
+  return want.length > 0 && got.length === want.length && timingSafeEqual(got, want);
 }
 
 export function checkPassword(input: string) {
@@ -75,7 +77,7 @@ export function checkPassword(input: string) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const PUBLIC = [/^\/media\//, /^\/oauth\/[^/]+\/callback/, /^\/api\/login$/, /^\/api\/health$/];
+const PUBLIC = [/^\/media\//, /^\/oauth\/[^/]+\/(callback|deauthorize|delete)/, /^\/api\/login$/, /^\/api\/health$/, /^\/api\/cron\//, /^\/api\/migrate\//];
 
 export async function authMiddleware(c: Context, next: Next) {
   const path = new URL(c.req.url).pathname;

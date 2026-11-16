@@ -63,15 +63,23 @@ Instagram должен быть **профессиональным** аккау�
 
 Открой **Каналы** и нажми **Threads** или **Instagram**, чтобы подключиться через OAuth. Ещё можно выбрать **«По токену»** и вставить токен, сгенерированный в кабинете Meta.
 
-## Деплой на Railway (24/7)
+## Деплой на Vercel + Supabase (24/7)
 
-1. New Project → Deploy from GitHub repo → выбери этот репозиторий. Сборка идёт по `Dockerfile` (настройки в `railway.json`).
-2. **Volume:** правый клик по сервису → Attach Volume, mount path `/data`. Там будут жить база и медиа. Без volume всё пропадёт при каждом деплое.
-3. **Variables:**
-   - `PANEL_PASSWORD`: пароль для входа (обязательно);
-   - `MCP_TOKEN`: необязательно, иначе сгенерируется сам и будет виден в Настройках.
-4. **Settings → Networking → Generate Domain.** Railway выдаст `https://….up.railway.app`, панель подхватит его сама (`RAILWAY_PUBLIC_DOMAIN`).
-5. Открой панель → Настройки: впиши ключи Meta и скопируй redirect URI в приложение Meta.
+- **База:** Postgres в Supabase. Таблицы создаются сами при первом запросе.
+- **Медиа:** Supabase Storage, публичный бакет `media`, создаётся сам. Сервера Meta скачивают файлы прямо оттуда. Браузер грузит файлы в Storage по подписанному URL, поэтому лимит Vercel на тело запроса (4.5 МБ) видео не мешает.
+- **API:** одна Node-функция Vercel. Сборка: `scripts/build-vercel.mjs` (Build Output API), настройки в `vercel.json`.
+- **Планировщик:** `GET /api/cron/tick` раз в минуту дёргает `pg_cron` + `pg_net` в Supabase. Публикация по расписанию, токены раз в 6 ч, статистика раз в 3 ч.
+
+Шаги:
+1. Vercel → Add New Project → этот репозиторий. Настройки сборки берутся из `vercel.json`.
+2. Supabase → Project Settings → Integrations → Vercel: подключи проект. Интеграция сама добавит `POSTGRES_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`.
+3. `PANEL_PASSWORD` в переменных Vercel (или пароль из базы).
+4. В Supabase SQL Editor:
+   ```sql
+   create extension if not exists pg_cron; create extension if not exists pg_net;
+   select cron.schedule('social-panel-tick', '* * * * *', $$ select net.http_get('https://<домен>/api/cron/tick') $$);
+   ```
+5. Открой панель → Настройки: публичный адрес = домен Vercel, redirect URI скопируй в приложение Meta.
 
 ### Claude.ai / Desktop / мобильное приложение (OAuth)
 
