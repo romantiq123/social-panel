@@ -58,6 +58,7 @@ writeFileSync(
       version: 3,
       routes: [
         { src: '^/(api|oauth|mcp|mcp-auth|media|\\.well-known)(/.*)?$', dest: '/index' },
+        { src: '^/$', dest: '/index.html' },
         { handle: 'filesystem' },
         { src: '/.*', dest: '/index.html' },
       ],

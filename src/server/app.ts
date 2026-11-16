@@ -52,10 +52,14 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 400);
 });
 
-// Каждый запрос: схема (один раз на инстанс), свежие настройки из БД, пароль/секреты
+// Каждый запрос: свежие настройки из БД, пароль/секреты. Схему (DDL) создаёт cron-тик и локальный старт,
+// чтобы холодный старт функции не тратил время на CREATE TABLE.
 app.use('*', async (c, next) => {
-  await ensureSchema();
-  await loadSettings();
+  await loadSettings().catch(async (e) => {
+    if (!/does not exist/.test(String(e?.message))) throw e;
+    await ensureSchema();
+    await loadSettings();
+  });
   await initAuth();
   await next();
 });
@@ -343,6 +347,7 @@ app.on(['GET', 'POST'], '/api/cron/tick', async (c) => {
   if (ticking) return c.json({ ok: true, skipped: true });
   ticking = true;
   try {
+    await ensureSchema();
     await tick();
   } finally {
     ticking = false;
