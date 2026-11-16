@@ -6,7 +6,7 @@ import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { db, ensureSchema, log } from '../core/db.ts';
 import { getSettings, loadSettings, publicSettings, updateSettings, SECRET_KEYS } from '../core/settings.ts';
-import { publicFileUrl, putFile } from '../core/storage.ts';
+import { publicFileUrl } from '../core/storage.ts';
 import {
   connectWithCode,
   connectWithToken,
@@ -333,43 +333,6 @@ app.all('/mcp', async (c) => {
     // ответ уже сформирован целиком (enableJsonResponse) — можно закрывать
     queueMicrotask(() => server.close().catch(() => {}));
   }
-});
-
-/* ------------------------- Разовый перенос с Railway ------------------------- */
-
-// Принимает дамп старой SQLite-базы и файлы. Работает только пока база пустая (каналов нет и импорта не было).
-// После переезда этот эндпоинт удаляется.
-const IMPORT_TABLES: Record<string, string[]> = {
-  settings: ['key', 'value'],
-  channels: ['id', 'provider', 'external_id', 'username', 'name', 'avatar_url', 'access_token', 'token_expires_at', 'token_refreshed_at', 'status', 'last_error', 'time_slots', 'followers_count', 'created_at'],
-  media: ['id', 'filename', 'original_name', 'mime', 'kind', 'size', 'width', 'height', 'created_at'],
-  posts: ['id', 'group_id', 'channel_id', 'status', 'content', 'media', 'options', 'scheduled_at', 'published_at', 'external_id', 'permalink', 'error', 'attempts', 'insights', 'insights_at', 'created_at', 'updated_at'],
-  signatures: ['id', 'name', 'content', 'created_at'],
-  oauth_clients: ['id', 'secret_hash', 'name', 'redirect_uris', 'created_at', 'last_used_at'],
-  oauth_tokens: ['hash', 'kind', 'client_id', 'scope', 'expires_at', 'created_at'],
-  logs: ['level', 'source', 'message', 'channel_id', 'post_id', 'created_at'],
-};
-
-app.post('/api/migrate/import', async (c) => {
-  const done = (await db.prepare(`SELECT 1 FROM settings WHERE key = '_imported'`).get()) || (await db.prepare('SELECT 1 FROM channels LIMIT 1').get());
-  if (done) return c.json({ error: 'Импорт уже выполнен или база не пустая' }, 409);
-  const body = (await c.req.json()) as { tables: Record<string, Record<string, unknown>[]>; files?: { filename: string; mime: string; b64: string }[]; password?: string };
-  const counts: Record<string, number> = {};
-  for (const [table, cols] of Object.entries(IMPORT_TABLES)) {
-    let rows = body.tables?.[table] ?? [];
-    // публичный адрес теперь — домен Vercel; служебные отметки планировщика не переносим
-    if (table === 'settings') rows = rows.filter((r) => r.key !== 'public_base_url' && !String(r.key).startsWith('_last_'));
-    const conflict = table === 'settings' ? ' ON CONFLICT (key) DO UPDATE SET value = excluded.value' : table === 'logs' ? '' : ' ON CONFLICT DO NOTHING';
-    const q = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})${conflict}`;
-    for (const r of rows) await db.prepare(q).run(...cols.map((k) => (r[k] === undefined ? null : r[k])));
-    counts[table] = rows.length;
-  }
-  for (const f of body.files ?? []) await putFile(basename(f.filename), Buffer.from(f.b64, 'base64'), f.mime);
-  counts.files = body.files?.length ?? 0;
-  if (body.password) await db.prepare(`INSERT INTO settings (key, value) VALUES ('_password', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`).run(body.password);
-  await db.prepare(`INSERT INTO settings (key, value) VALUES ('_imported', ?) ON CONFLICT (key) DO NOTHING`).run(new Date().toISOString());
-  await log('info', 'migrate', `Импорт с Railway: ${JSON.stringify(counts)}`);
-  return c.json({ ok: true, counts });
 });
 
 /* ---------------------------------- Cron ---------------------------------- */

@@ -77,7 +77,7 @@ export function checkPassword(input: string) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const PUBLIC = [/^\/media\//, /^\/oauth\/[^/]+\/(callback|deauthorize|delete)/, /^\/api\/login$/, /^\/api\/health$/, /^\/api\/cron\//, /^\/api\/migrate\//];
+const PUBLIC = [/^\/media\//, /^\/oauth\/[^/]+\/(callback|deauthorize|delete)/, /^\/api\/login$/, /^\/api\/health$/, /^\/api\/cron\//];
 
 export async function authMiddleware(c: Context, next: Next) {
   const path = new URL(c.req.url).pathname;

@@ -47,7 +47,7 @@ console.log(`nft: скопировано файлов ${copied}`);
 
 writeFileSync(
   join(FN, '.vc-config.json'),
-  JSON.stringify({ runtime: 'nodejs22.x', handler: 'index.mjs', launcherType: 'Nodejs', shouldAddHelpers: false, maxDuration: 300, memory: 1024 }, null, 2),
+  JSON.stringify({ runtime: 'nodejs22.x', handler: 'index.mjs', launcherType: 'Nodejs', shouldAddHelpers: false, maxDuration: 300, memory: 1024, regions: ['fra1'] }, null, 2),
 );
 
 // 3) маршруты: API/OAuth/MCP → функция, остальное — статика с SPA-фолбэком
